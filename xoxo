@@ -1,0 +1,139 @@
+#!/usr/bin/env ruby
+
+require 'rubygems'
+require 'bundler/setup'
+require 'gmail'
+require 'yaml'
+require 'ostruct'
+require 'pry' # For debug purpose
+require 'fileutils'
+
+config_dir = File.expand_path('~/.xoxo')
+users_dir = File.join(config_dir, 'users')
+config_file_path = File.join(config_dir, 'config.yml')
+
+# Setup
+unless File.exist?(config_dir)
+  begin
+    FileUtils.mkdir_p(users_dir)
+    config = {}
+    puts 'Your Gmail account?'
+    config['username'] = gets.chomp
+    puts "Password for #{config['username']}"
+    config['password'] = gets.chomp
+    File.open(config_file_path, 'w') { |f| f << config.to_yaml }
+    puts 'The email address of your sweet beloved?'
+    recipient = gets.chomp
+    FileUtils.mkdir(File.join(users_dir, recipient))
+  rescue
+    FileUtils.rm_rf(config_dir, secure: true)
+    fail
+  end
+end
+
+config = OpenStruct.new(YAML.load_file(config_file_path))
+
+user_dir = Dir.glob(File.join(users_dir, '*')).first
+recipient = File.basename(user_dir)
+user_data_file_path = File.join(user_dir, 'data.yml')
+
+user_data = {
+  'done' => []
+}
+if File.exist?(user_data_file_path)
+  user_data = YAML.load_file(user_data_file_path)
+end
+
+class PickCandy
+  class NoAvailableCandyError < StandardError
+  end
+
+  # TODO: use a real service implementation
+  def self.run!(*args)
+    new(*args).run!
+  end
+
+  def initialize(files, exclude_list)
+    @files = files
+    @exclude_list = exclude_list
+  end
+
+  def run!
+    key = available_candies.keys.sample
+    fail NoAvailableCandyError unless key
+    Candy.new key, available_candies[key]
+  end
+
+  private
+
+  def available_candies
+    @_available_candies ||= candies.delete_if { |k, _| @exclude_list.include?(k) }
+  end
+
+  def candies
+    @_candies ||= @files.group_by do |file|
+      File.basename(file).sub(/#{Regexp.escape(File.extname(file))}$/, '')
+    end
+  end
+end
+
+# A candy can have a quote and/or an attached file
+class Candy
+  attr_reader :name, :quote, :attachments
+
+  def initialize(name, files)
+    @name = name
+    @quote = nil
+    @attachments = []
+    files.each do |file|
+      case File.extname(file)
+      when '.txt'
+        @quote = File.read(file).chomp
+      else
+        @attachments << file
+      end
+    end
+  end
+
+  def to_s
+    "Candy '#{name}', '#{quote}', #{attachments.join(', ')}"
+  end
+end
+
+EXCLUDE_LIST = %w(data)
+exclude_list = EXCLUDE_LIST + user_data['done'].map { |i| i['candy_name'] }
+
+candy = PickCandy.run!(Dir.glob(File.join(user_dir, '*.*')), exclude_list)
+
+puts candy
+
+gmail = Gmail.connect(config.username, config.password)
+
+# Send an email
+email = gmail.compose do
+  to recipient
+  subject 'Your daily candy'
+  text_part do
+    body candy.quote
+  end
+  candy.attachments.each do |attachment|
+    add_file attachment
+  end
+end
+
+email.deliver!
+
+# Read emails
+# gmail.inbox.emails(:unread).each do |email|
+#   sender = email.sender.first
+#   sender_email = sender.mailbox + '@' + sender.host
+#   next unless sender_email == recipient
+#   puts email.subject
+#   email.read!
+# end
+#
+gmail.logout
+
+# Update and write user data
+user_data['done'] << { 'candy_name' => candy.name, 'sent_at' => Time.now.utc }
+File.open(user_data_file_path, 'w') { |f| f << user_data.to_yaml }
