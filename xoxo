@@ -7,50 +7,10 @@ require 'yaml'
 require 'ostruct'
 require 'pry' # For debug purpose
 require 'fileutils'
+require_relative 'lib/service'
 
-config_dir = File.expand_path('~/.xoxo')
-users_dir = File.join(config_dir, 'users')
-config_file_path = File.join(config_dir, 'config.yml')
-
-# Setup
-unless File.exist?(config_dir)
-  begin
-    FileUtils.mkdir_p(users_dir)
-    config = {}
-    puts 'Your Gmail account?'
-    config['username'] = gets.chomp
-    puts "Password for #{config['username']}"
-    config['password'] = gets.chomp
-    File.open(config_file_path, 'w') { |f| f << config.to_yaml }
-    puts 'The email address of your sweet beloved?'
-    recipient = gets.chomp
-    FileUtils.mkdir(File.join(users_dir, recipient))
-  rescue
-    FileUtils.rm_rf(config_dir, secure: true)
-    fail
-  end
-end
-
-config = OpenStruct.new(YAML.load_file(config_file_path))
-
-user_dir = Dir.glob(File.join(users_dir, '*')).first
-recipient = File.basename(user_dir)
-user_data_file_path = File.join(user_dir, 'data.yml')
-
-user_data = {
-  'done' => []
-}
-if File.exist?(user_data_file_path)
-  user_data = YAML.load_file(user_data_file_path)
-end
-
-class PickCandy
+class PickCandy < Service
   class NoAvailableCandyError < StandardError
-  end
-
-  # TODO: use a real service implementation
-  def self.run!(*args)
-    new(*args).run!
   end
 
   def initialize(files, exclude_list)
@@ -58,13 +18,13 @@ class PickCandy
     @exclude_list = exclude_list
   end
 
-  def run!
+  private
+
+  def execute
     key = available_candies.keys.sample
     fail NoAvailableCandyError unless key
     Candy.new key, available_candies[key]
   end
-
-  private
 
   def available_candies
     @_available_candies ||= candies.delete_if { |k, _| @exclude_list.include?(k) }
@@ -100,29 +60,6 @@ class Candy
   end
 end
 
-EXCLUDE_LIST = %w(data)
-exclude_list = EXCLUDE_LIST + user_data['done'].map { |i| i['candy_name'] }
-
-candy = PickCandy.run!(Dir.glob(File.join(user_dir, '*.*')), exclude_list)
-
-puts candy
-
-gmail = Gmail.connect(config.username, config.password)
-
-# Send an email
-email = gmail.compose do
-  to recipient
-  subject 'Your daily candy'
-  text_part do
-    body candy.quote
-  end
-  candy.attachments.each do |attachment|
-    add_file attachment
-  end
-end
-
-email.deliver!
-
 # Read emails
 # gmail.inbox.emails(:unread).each do |email|
 #   sender = email.sender.first
@@ -132,8 +69,179 @@ email.deliver!
 #   email.read!
 # end
 #
-gmail.logout
 
-# Update and write user data
-user_data['done'] << { 'candy_name' => candy.name, 'sent_at' => Time.now.utc }
-File.open(user_data_file_path, 'w') { |f| f << user_data.to_yaml }
+class Context
+  attr_reader :working_dir, :users_dir
+  def initialize(working_dir)
+    # TODO: Use constants
+    @working_dir = File.expand_path(working_dir)
+    @users_dir = File.join(@working_dir, 'users')
+    @config_file_path = File.join(@working_dir, 'config.yml')
+  end
+
+  def config
+    OpenStruct.new(YAML.load_file(@config_file_path))
+  end
+end
+
+class CheckDeliveryForAllUsers < Service
+  def initialize(users)
+    @users = users
+  end
+
+  private
+
+  def execute
+    @users.each do |user|
+      CheckDelivery.run!(user)
+    end
+  end
+end
+
+# TODO: Refactor
+module GmailSession
+  def self.get
+    Gmail.connect(@config.username, @config.password)
+  end
+
+  def self.init(config)
+    @config = config
+  end
+end
+
+class DeliverCandy < Service
+  def initialize(user, candy)
+    @user = user
+    @candy = candy
+  end
+
+  private
+
+  def execute
+    # TODO: Refactor
+    gmail = GmailSession.get
+
+    # TODO: Don't know why I have to do this
+    user = @user
+    candy = @candy
+
+    email = gmail.compose do
+      to user.name
+      subject 'Your daily candy'
+      text_part do
+        body candy.quote
+      end
+      candy.attachments.each do |attachment|
+        add_file attachment
+      end
+    end
+
+    email.deliver!
+    gmail.logout
+  end
+end
+
+class User
+  attr_reader :dir, :name
+
+  def initialize(user_dir)
+    @dir = user_dir
+    @name = File.basename(@dir)
+
+    # TODO: Use constant
+    @data_file_path = File.join(user_dir, 'data.yml')
+
+    # TODO: This code doesn't belong here
+    @data = { 'done' => [] }
+    if File.exist?(@data_file_path)
+      @data = YAML.load_file(@data_file_path)
+    end
+  end
+
+  def candy_files
+    # TODO: Use constant
+    Dir.glob(File.join(@dir, 'candies', '*.*'))
+  end
+
+  def excluded_candies
+    @data['done'].map { |i| i['candy_name'] }
+  end
+
+  def exclude_candy(candy)
+    @data['done'] << { 'candy_name' => candy.name, 'sent_at' => Time.now.utc }
+  end
+
+  def save!
+    File.open(@data_file_path, 'w') { |f| f << @data.to_yaml }
+  end
+end
+
+class CheckDelivery < Service
+  def initialize(user)
+    @user = user
+  end
+
+  private
+
+  def execute
+    begin
+      candy = PickCandy.run!(@user.candy_files, @user.excluded_candies)
+    rescue PickCandy::NoAvailableCandyError
+      puts "No candy found for #{@user.name}"
+      return
+    end
+    puts candy
+    DeliverCandy.run!(@user, candy)
+    @user.exclude_candy(candy)
+    @user.save!
+  end
+end
+
+class Xoxo < Service
+  def initialize(context)
+    @context = context
+  end
+
+  private
+
+  def execute
+    # TODO: Manage interuptions
+    # TODO: Make the scheduler
+    run_once
+    # TODO! Use a valid return value
+  end
+
+  def run_once
+    # Check all users sequentially
+    CheckDeliveryForAllUsers.run!(users)
+    # TODO: Check the xoxo inbox
+  end
+
+  def users
+    Dir.glob(File.join(@context.users_dir, '*')).map { |dir| User.new(dir) }
+  end
+end
+
+# # Setup
+# unless File.exist?(config_dir)
+#   begin
+#     FileUtils.mkdir_p(users_dir)
+#     config = {}
+#     puts 'Your Gmail account?'
+#     config['username'] = gets.chomp
+#     puts "Password for #{config['username']}"
+#     config['password'] = gets.chomp
+#     File.open(config_file_path, 'w') { |f| f << config.to_yaml }
+#     puts 'The email address of your sweet beloved?'
+#     recipient = gets.chomp
+#     # TODO: Refactor candies dir path
+#     FileUtils.mkdir_p(File.join(users_dir, recipient, 'candies'))
+#   rescue
+#     FileUtils.rm_rf(config_dir, secure: true)
+#     fail
+#   end
+# end
+
+context = Context.new('~/.xoxo')
+GmailSession.init context.config
+Xoxo.run!(context)
