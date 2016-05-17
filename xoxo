@@ -8,6 +8,7 @@ require 'ostruct'
 require 'pry' # For debug purpose
 require 'fileutils'
 require_relative 'lib/service'
+require 'tickle'
 
 class PickCandy < Service
   class NoAvailableCandyError < StandardError
@@ -167,6 +168,20 @@ class User
     @data['done'].map { |i| i['candy_name'] }
   end
 
+  def candy_delivered(candy)
+    exclude_candy(candy)
+    @data['deliver_candy_at'] = next_delivery_date.utc.to_s
+  end
+
+  def deliver_candy_at
+    return Time.now unless @data['deliver_candy_at']
+    Time.parse @data['deliver_candy_at']
+  end
+
+  def next_delivery_date
+    Tickle.parse('everyday', start: deliver_candy_at, next_only: true)
+  end
+
   def exclude_candy(candy)
     @data['done'] << { 'candy_name' => candy.name, 'sent_at' => Time.now.utc }
   end
@@ -184,6 +199,7 @@ class CheckDelivery < Service
   private
 
   def execute
+    return unless should_deliver_candy?
     begin
       candy = PickCandy.run!(@user.candy_files, @user.excluded_candies)
     rescue PickCandy::NoAvailableCandyError
@@ -192,8 +208,14 @@ class CheckDelivery < Service
     end
     puts candy
     DeliverCandy.run!(@user, candy)
-    @user.exclude_candy(candy)
+    @user.candy_delivered(candy)
+    # TODO: This will be messy because the user is never reloaded
     @user.save!
+  end
+
+  def should_deliver_candy?
+    return true unless @user.deliver_candy_at
+    @user.deliver_candy_at <= Time.now.utc
   end
 end
 
@@ -206,9 +228,12 @@ class Xoxo < Service
 
   def execute
     # TODO: Manage interuptions
-    # TODO: Make the scheduler
-    run_once
-    # TODO! Use a valid return value
+    while true
+      run_once
+      puts "Going to sleep for 10 minutes..."
+      sleep 10 * 60 # 10 minutes
+    end
+    # TODO: Use a valid return value
   end
 
   def run_once
