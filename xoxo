@@ -9,6 +9,7 @@ require 'pry' # For debug purpose
 require 'fileutils'
 require_relative 'lib/service'
 require 'tickle'
+require 'erb'
 
 class PickCandy < Service
   class NoAvailableCandyError < StandardError
@@ -122,23 +123,49 @@ class DeliverCandy < Service
     # TODO: Refactor
     gmail = GmailSession.get
 
-    # TODO: Don't know why I have to do this
-    user = @user
-    candy = @candy
+    candy_email = CandyEmailPresenter.new(@user, @candy)
 
     email = gmail.compose do
-      to user.name
-      subject 'Your daily candy'
-      text_part do
-        body candy.quote
+      to candy_email.recipient
+      subject candy_email.subject
+      #text_part do
+      #  body candy.quote
+      #end
+      html_part do
+        content_type 'text/html; charset=UTF-8'
+        body candy_email.body
       end
-      candy.attachments.each do |attachment|
+      candy_email.attachments.each do |attachment|
         add_file attachment
       end
     end
 
     email.deliver!
     gmail.logout
+  end
+end
+
+class CandyEmailPresenter
+  def initialize(user, candy)
+    @user = user
+    @candy = candy
+  end
+
+  def recipient
+    @user.name
+  end
+
+  def attachments
+    @candy.attachments
+  end
+
+  def subject
+    'Your daily candy'
+  end
+
+  def body
+    renderer = ERB.new(File.read(File.join('templates', 'candy.html.erb')))
+    renderer.result(binding)
   end
 end
 
