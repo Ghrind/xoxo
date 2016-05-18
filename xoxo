@@ -188,7 +188,7 @@ class User
 
   def candy_files
     # TODO: Use constant
-    Dir.glob(File.join(@dir, 'candies', '*.*'))
+    Dir.glob(File.join(@dir, 'candies', '**', '*.*'))
   end
 
   def excluded_candies
