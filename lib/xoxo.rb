@@ -193,7 +193,7 @@ class User
 
   def candy_delivered(candy)
     exclude_candy(candy)
-    @data['deliver_candy_at'] = next_delivery_date.utc.to_s
+    @data['deliver_candy_at'] = next_delivery_date.to_s
   end
 
   def deliver_candy_at
@@ -202,9 +202,9 @@ class User
   end
 
   def next_delivery_date
-    now = Time.now
-    start = Time.new(now.year, now.month, now.day, deliver_candy_at.hour, deliver_candy_at.min)
-    Tickle.parse('everyday', start: start, next_only: true)
+    now = Time.now.utc
+    start = Time.utc(now.year, now.month, now.day, deliver_candy_at.hour, deliver_candy_at.min)
+    Tickle.parse('everyday', start: start, next_only: true).utc
   end
 
   def exclude_candy(candy)
